@@ -235,9 +235,9 @@ template<class Type> class QFormat : public Type {
     }
 
   public:
-    typename Type::IntType mQformatInt;
+    typename Type::IntType mQformatInt {};
 #ifdef QFORMAT_USE_FLOAT_VAL
-    float mFloatVal;
+    float mFloatVal {};
 #endif
 };
 
