@@ -12,74 +12,104 @@
 #warning "QFormat is working only on C++17 and above"
 #endif
 
-template<typename Integer, std::size_t Q, std::enable_if_t<std::is_integral<Integer>::value, bool> = true> class QType {
+template<typename Integer,
+         typename IntermedType,
+         std::size_t Q,
+         std::enable_if_t<std::is_integral<Integer>::value, bool> = true>
+class QType {
   public:
     typedef Integer IntType;
+    typedef IntermedType IntermediateType;
 
     inline static constexpr uint32_t N              = std::numeric_limits<std::make_unsigned_t<Integer>>::digits;
     inline static constexpr uint32_t SignCorrection = std::is_signed_v<Integer>;
     inline static constexpr uint32_t Roundup        = 1 << (N - 1);
     inline static constexpr uint32_t FraqBitN       = N - Q;
     inline static constexpr uint32_t IntBitN        = Q;
-    inline static constexpr uint32_t Scale          = 1 << FraqBitN;
+    inline static constexpr uint32_t Scale          = IntermediateType(1) << FraqBitN;
 
   public:
     QType()  = default;
     ~QType() = default;
 
-    bool Validate(Integer scaled_val) {
+    bool Validate(Integer scaledVal) {
         constexpr auto threshold = 1 << (N - 1);
-        return scaled_val >= threshold or scaled_val < -threshold;
+        return scaledVal >= threshold or scaledVal < -threshold;
     }
 
-    template<class T2, std::size_t Q2> constexpr inline bool operator==(const QType<T2, Q2> &rhs) {
+    template<class T1, class T2, std::size_t Q2> constexpr inline bool operator==(const QType<T1, T2, Q2> &rhs) {
         return (this->FraqBitN == rhs.FraqBitN) and (this->IntBitN == rhs.IntBitN);
     }
 
-    template<class T2, std::size_t Q2> constexpr inline bool operator!=(const QType<T2, Q2> &rhs) {
+    template<class T1, class T2, std::size_t Q2> constexpr inline bool operator!=(const QType<T1, T2, Q2> &rhs) {
         return !(*this == rhs);
     }
 };
 
-using Q15 = QType<int16_t, 1>;
-using Q29 = QType<int32_t, 3>;
-using Q31 = QType<int32_t, 1>;
+using Q15 = QType<int16_t, int32_t, 1>;
+using Q29 = QType<int32_t, int64_t, 3>;
+using Q31 = QType<int32_t, int64_t, 1>;
 
-using Q15U  = QType<uint16_t, 1>;
-using Q29U  = QType<uint32_t, 3>;
-using Q31SU = QType<uint32_t, 1>;
+using Q15U  = QType<uint16_t, uint32_t, 1>;
+using Q29U  = QType<uint32_t, uint64_t, 3>;
+using Q31SU = QType<uint32_t, uint64_t, 1>;
 
 
-template<class Type> class QFormat : public Type {
+template<class Type, bool EnableRounding = true> class QFormat : public Type {
   public:
-    constexpr QFormat(typename Type::IntType val) : mQformatInt{ val } {
+    constexpr QFormat() : mQformatInt{ 0 } {
+#ifdef QFORMAT_USE_FLOAT_VAL
+        mFloatVal = 0.0f;
+#endif
+    }
+
+    template<typename T, typename std::enable_if_t<std::is_integral<T>::value, bool> = true>
+    constexpr inline explicit QFormat(T val) noexcept
+        : mQformatInt(static_cast<typename Type::IntType>(val * Type::Scale)) {
 #ifdef QFORMAT_USE_FLOAT_VAL
         mFloatVal = ToFloat(val);
 #endif
     }
 
-    constexpr QFormat(float val) : mQformatInt{ ToQFormat(val) } {
+    //     constexpr QFormat(typename Type::IntType val) : mQformatInt{ val } {
+    // #ifdef QFORMAT_USE_FLOAT_VAL
+    //         mFloatVal = ToFloat(val);
+    // #endif
+    //     }
+
+    template<typename T, typename std::enable_if_t<std::is_floating_point<T>::value, bool> = true>
+    constexpr inline explicit QFormat(T val) noexcept
+        : mQformatInt(static_cast<typename Type::IntType>(
+              (EnableRounding) ? (val >= 0.0) ? (val * Type::Scale + T{ 0.5 }) : (val * Type::Scale - T{ 0.5 })
+                               : (val * Type::Scale))) {
 #ifdef QFORMAT_USE_FLOAT_VAL
         mFloatVal = ToFloat(mQformatInt);
 #endif
     }
 
+
+    //     constexpr QFormat(float val) : mQformatInt{ ToQFormat(val) } {
+    // #ifdef QFORMAT_USE_FLOAT_VAL
+    //         mFloatVal = ToFloat(mQformatInt);
+    // #endif
+    //     }
+
     // Constructor for converting between Q formats
     template<class TypeT2> constexpr QFormat(const QFormat<TypeT2> &source) {
-        const int32_t bit_inc = this->FraqBitN - source.FraqBitN;
-        if (bit_inc == 0) {
+        const int32_t bitInc = this->FraqBitN - source.FraqBitN;
+        if (bitInc == 0) {
             mQformatInt = source.mQformatInt;
-        } else if (bit_inc > 0) {
-            auto new_val = source.mQformatInt << bit_inc;
+        } else if (bitInc > 0) {
+            auto newVal = source.mQformatInt << bitInc;
             if (source.mQformatInt > 0) {
-                new_val |= 1 << (bit_inc - 1);
+                newVal |= 1 << (bitInc - 1);
             } else {
-                new_val |= ((1 << (bit_inc - 1)) - 1);
+                newVal |= ((1 << (bitInc - 1)) - 1);
             }
 
-            mQformatInt = new_val;
+            mQformatInt = newVal;
         } else {
-            mQformatInt = source.mQformatInt >> -bit_inc;
+            mQformatInt = source.mQformatInt >> -bitInc;
         }
 
 #ifdef QFORMAT_USE_FLOAT_VAL
@@ -145,16 +175,27 @@ template<class Type> class QFormat : public Type {
     }
     //=============================================================================
     constexpr inline QFormat &operator*=(const QFormat &rhs) {
-        typename Type::IntType    result;
-        decltype(result * result) temp;
+        // typename Type::IntType    result;
+        // decltype(result * result) temp;
 
-        temp = static_cast<decltype(temp)>(mQformatInt) * static_cast<decltype(temp)>(rhs.mQformatInt);
+        // temp = static_cast<decltype(temp)>(mQformatInt) * static_cast<decltype(temp)>(rhs.mQformatInt);
 
-        temp += (1 << (Type::FraqBitN - 1));
+        // temp += (1 << (Type::FraqBitN - 1));
 
-        result = Saturate(temp >> Type::FraqBitN);
+        // result = Saturate(temp >> Type::FraqBitN);
 
-        mQformatInt = result;
+        // mQformatInt = result;
+
+        // if (EnableRounding) {
+        //     // Normal fixed-point multiplication is: x * y / 2**FractionBits.
+        //     // To correctly round the last bit in the result, we need one more bit of information.
+        //     // We do this by multiplying by two before dividing and adding the LSB to the real result.
+        //     auto value = (static_cast<decltype(mQformatInt * mQformatInt)>(mQformatInt) * rhs.mQformatInt) / (Type::Scale / 2);
+        //     mQformatInt    = static_cast<typename Type::IntType>((value / 2) + (value % 2));
+        // } else {
+            auto value = (static_cast<decltype(mQformatInt * mQformatInt)>(mQformatInt) * rhs.mQformatInt) / Type::Scale;
+            mQformatInt    = Saturate(static_cast<typename Type::IntType>(value));
+        // }
 
 #ifdef QFORMAT_USE_FLOAT_VAL
         mFloatVal = ToFloat(mQformatInt);
@@ -216,15 +257,7 @@ template<class Type> class QFormat : public Type {
 
     constexpr inline typename Type::IntType GetFraqPart() { return mQformatInt & GetLsbQBitsSet(); }
 
-  private:
-    constexpr inline typename Type::IntType ToQFormat(float n) const {
-        return static_cast<typename Type::IntType>(std::round(n * Type::Scale));
-    }
-
-    constexpr inline float ToFloat(typename Type::IntType n) const { return static_cast<float>(n) / Type::Scale; }
-
-    constexpr inline typename Type::IntType Saturate(decltype(std::declval<typename Type::IntType>()
-                                                              * std::declval<typename Type::IntType>()) n) {
+    constexpr inline typename Type::IntType Saturate(typename Type::IntermediateType n) {
         if (n > std::numeric_limits<typename Type::IntType>::max()) {
             return std::numeric_limits<typename Type::IntType>::max();
         } else if (n < std::numeric_limits<typename Type::IntType>::min()) {
@@ -233,6 +266,13 @@ template<class Type> class QFormat : public Type {
 
         return static_cast<typename Type::IntType>(n);
     }
+
+  private:
+    constexpr inline typename Type::IntType ToQFormat(float n) const {
+        return static_cast<typename Type::IntType>(std::floor(n * Type::Scale));
+    }
+
+    constexpr inline float ToFloat(typename Type::IntType n) const { return static_cast<float>(n) / Type::Scale; }
 
   public:
     typename Type::IntType mQformatInt{};
